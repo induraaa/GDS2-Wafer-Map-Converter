@@ -9,10 +9,12 @@ Requires: Python 3.8+  (tkinter included in all standard Python installs)
 import re
 import math
 import threading
+import sys
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
 from typing import List, Tuple, Optional, Set
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -145,8 +147,8 @@ WIN_BTNFACE = "#e1e1e1"
 WIN_TEXT = "#000000"
 WIN_TEXT2 = "#555555"
 
-DIE_COL = "#00aa44"
-EDGE_COL = "#1a75cc"
+DIE_COL = "#26ff00"
+EDGE_COL = "#2e302d"
 EMPTY_COL = "#cce4f0"
 OUT_COL = "#f0f0f0"
 
@@ -282,6 +284,8 @@ class App(tk.Tk):
 
         fm = tk.Menu(mb, tearoff=0, font=FONT, bg=WIN_BG)
         fm.add_command(label="Open GDS2 File...     Ctrl+O", command=self._browse)
+        # 👉 Add this:
+        fm.add_command(label="Open ASCII Wafer Map...   Ctrl+Shift+O", command=self._open_ascii_map)
         fm.add_separator()
         fm.add_command(label="Export Wafer Map...   Ctrl+S", command=self._export)
         fm.add_separator()
@@ -302,7 +306,8 @@ class App(tk.Tk):
 
         self.bind("<Control-o>", lambda e: self._browse())
         self.bind("<Control-s>", lambda e: self._export())
-
+        # 👉 Add this:
+        self.bind("<Control-Shift-O>", lambda e: self._open_ascii_map())
     # ── Toolbar ───────────────────────────────────────────────────────────────
     def _build_toolbar(self):
         tb = tk.Frame(self, bg=WIN_BG, relief=tk.RAISED, bd=1)
@@ -310,6 +315,13 @@ class App(tk.Tk):
 
         self._tbb_open = ToolButton(tb, "📂", "Open", self._browse)
         self._tbb_open.pack(side=tk.LEFT, padx=2, pady=2)
+
+        self._tbb_open_map = ToolButton(tb, "📄", "Open Map", self._open_ascii_map)
+        self._tbb_open_map.pack(side=tk.LEFT, padx=2, pady=2)
+
+        self._tbb_convert = ToolButton(tb, "⚙", "Convert", self._run_convert)
+        self._tbb_convert.pack(side=tk.LEFT, padx=2, pady=2)
+        self._tbb_convert.set_state(tk.DISABLED)
 
         self._tbb_convert = ToolButton(tb, "⚙", "Convert", self._run_convert)
         self._tbb_convert.pack(side=tk.LEFT, padx=2, pady=2)
@@ -954,6 +966,70 @@ class App(tk.Tk):
         self._raw_txt.delete("1.0", tk.END)
         self._raw_txt.insert(tk.END, text)
 
+    def _open_ascii_map(self):
+        """Open an existing ASCII wafer map file (.txt/.map/.csv), show in Raw Output,
+        parse rows into grid, and render the map (no GDS2 conversion)."""
+        path = filedialog.askopenfilename(
+            title="Open Wafer Map Text",
+            filetypes=[("Wafer map text", "*.txt *.map *.csv"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+
+        p = Path(path)
+        try:
+            # Read bytes (latin-1 compatible) and reflect in Raw panel
+            raw_bytes = p.read_bytes()
+            self._out_bytes = raw_bytes
+            self._grid = None
+            self._gds_text = None  # Not a GDS2 session
+            self._input_path = p
+
+            # Update "Input File" label and default export name
+            nm = p.name if len(p.name) <= 30 else "..." + p.name[-27:]
+            self._file_lbl.config(text=nm, fg=WIN_TEXT)
+            self._v_out_name.set(p.stem + "_copy.txt")
+
+            # Show in Raw Output
+            self._empty_lbl.place_forget()
+            self._update_raw()
+
+            # Parse the raw text into grid using existing logic
+            # (reuses the same parser the live-editor uses)
+            self._update_from_raw_auto()
+
+            # UI enablement: exporting + view tools on, convert off
+            parsed_ok = bool(self._grid)
+            self._btn_export.config(state=tk.NORMAL if parsed_ok else tk.DISABLED)
+            for tb in (self._tbb_export, self._tbb_zin, self._tbb_zout, self._tbb_fit):
+                tb.set_state(tk.NORMAL if parsed_ok else tk.DISABLED)
+
+            self._btn_convert.config(state=tk.DISABLED)
+            self._tbb_convert.set_state(tk.DISABLED)
+
+            # Status + stats
+            if parsed_ok:
+                rows = len(self._grid)
+                cols = len(self._grid[0]) if self._grid else 0
+                die_count = sum(r.count('?') for r in self._grid)
+                self._s_rows.config(text=str(rows))
+                self._s_cols.config(text=str(cols))
+                self._s_dies.config(text=f"{die_count:,}")
+                self._s_size.config(text=fmt_size(len(self._out_bytes)))
+                self._set_status(f"Loaded wafer map: {p.name}", fmt_size(len(self._out_bytes)))
+                # Fit view for convenience
+                self._fit_pending = True
+                self.after(150, self._fit)
+            else:
+                self._s_rows.config(text="—")
+                self._s_cols.config(text="—")
+                self._s_dies.config(text="—")
+                self._s_size.config(text=fmt_size(len(self._out_bytes)))
+                self._set_status("Loaded text (couldn't detect map rows). Edit Raw Output and it will re-render.")
+
+        except Exception as e:
+            messagebox.showerror("Open Error", str(e))
+            self._set_status("Open failed.")
     # ── Export ────────────────────────────────────────────────────────────────
     def _export(self):
         if not self._out_bytes:
