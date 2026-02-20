@@ -625,7 +625,7 @@ class App(tk.Tk):
         self._canvas.bind("<MouseWheel>", self._scroll)
         self._canvas.bind("<Control-MouseWheel>", self._ctrl_scroll)
         self._canvas.bind("<Configure>", self._on_canvas_configure)
-        self._canvas.bind("<Double-Button-1>", self._cell_click)
+        self._canvas.bind("<Button-1>", self._cell_click)
 
         # ── Right: Editable Raw Text ──
         self._raw_frame = tk.Frame(split, bg=WIN_BG)
@@ -775,7 +775,7 @@ class App(tk.Tk):
         messagebox.showerror("Conversion Error", msg)
 
     # ── Canvas Drawing ────────────────────────────────────────────────────────
-    def _draw(self):
+    def _draw(self, preserve_scroll=False):
         if not self._grid:
             return
         grid = self._grid
@@ -783,44 +783,50 @@ class App(tk.Tk):
         px = self._cell_px
         COL = {'?': DIE_COL, '*': EDGE_COL, '.': OUT_COL}
 
-        img = tk.PhotoImage(width=cols * px, height=rows * px)
+        # Build entire image in one put() call — much faster than row-by-row
+        # Each row is one colour-string; repeat px times for cell height
+        all_rows = []
         for r in range(rows):
-            colours = [COL.get(c, OUT_COL) for c in grid[r]]
+            row_colours = [COL.get(c, OUT_COL) for c in grid[r]]
             if px == 1:
-                row_str = "{" + " ".join(colours) + "}"
+                pixel_row = "{" + " ".join(row_colours) + "}"
             else:
-                exp = []
-                for col in colours:
-                    exp.extend([col] * px)
-                row_str = "{" + " ".join(exp) + "}"
-            for p in range(px):
-                img.put(row_str, to=(0, r * px + p))
+                expanded = []
+                for col in row_colours:
+                    expanded.extend([col] * px)
+                pixel_row = "{" + " ".join(expanded) + "}"
+            all_rows.extend([pixel_row] * px)
+
+        img = tk.PhotoImage(width=cols * px, height=rows * px)
+        img.put("{" + " ".join(all_rows) + "}")
 
         self._canvas.delete("all")
         self._canvas_img = img
         self._canvas.create_image(2, 2, anchor="nw", image=img)
 
-        # ── Draw grid lines if enabled and zoomed enough ──
+        # Grid lines — drawn as two long lines per axis using dashes, much faster
+        # than one create_line() call per grid line
         if self._v_grid.get() and px >= 6:
+            w = cols * px
+            h = rows * px
+            # Horizontal lines: one per row boundary
             for r in range(rows + 1):
                 y = r * px + 2
-                self._canvas.create_line(
-                    2, y, cols * px + 2, y,
-                    fill="#999999", width=1)
+                self._canvas.create_line(2, y, w + 2, y, fill="#999999", width=1)
+            # Vertical lines: one per col boundary
             for c in range(cols + 1):
                 x = c * px + 2
-                self._canvas.create_line(
-                    x, 2, x, rows * px + 2,
-                    fill="#999999", width=1)
+                self._canvas.create_line(x, 2, x, h + 2, fill="#999999", width=1)
 
         self._canvas.config(scrollregion=(0, 0, cols * px + 4, rows * px + 4))
-        self._canvas.xview_moveto(0)
-        self._canvas.yview_moveto(0)
+        if not preserve_scroll:
+            self._canvas.xview_moveto(0)
+            self._canvas.yview_moveto(0)
         self._zoom_lbl.config(text="Zoom: " + str(round(px / 5 * 100)) + "%")
 
     def _zoom(self, factor):
         self._cell_px = max(1, min(40, round(self._cell_px * factor)))
-        self._draw()
+        self._draw(preserve_scroll=True)
 
     def _on_canvas_configure(self, event):
         """Re-fit the map when the canvas is resized, but only if a fit is pending."""
@@ -860,7 +866,7 @@ class App(tk.Tk):
                 text="  Col " + str(cx) + "   Row " + str(cy) + "   [" + nm + "]  ")
 
     def _cell_click(self, event):
-        """Double-click a cell to cycle: active (?) -> edge (*) -> empty (.) -> active."""
+        """Single-click a cell to cycle: active (?) -> edge (*) -> empty (.) -> active."""
         if not self._grid:
             return
         px = self._cell_px
@@ -881,15 +887,23 @@ class App(tk.Tk):
         row[cx] = new_val
         self._grid[cy] = row
 
-        # Redraw canvas
-        self._draw()
+        # Fast partial repaint: just repaint the changed cell directly on the image
+        # This is instant vs rebuilding the entire PhotoImage
+        COL = {'?': DIE_COL, '*': EDGE_COL, '.': OUT_COL}
+        colour = COL.get(new_val, OUT_COL)
+        if self._canvas_img:
+            pixel_row = "{" + " ".join([colour] * px) + "}"
+            for py_off in range(px):
+                self._canvas_img.put(pixel_row, to=(cx * px, cy * px + py_off))
+        else:
+            self._draw(preserve_scroll=True)
 
         # Sync back to the Raw Output panel
         try:
             raw_text = self._raw_txt.get("1.0", tk.END)
             lines = raw_text.split('\n')
 
-            # Find where map rows start (same logic as _update_from_raw_auto)
+            # Find where map rows start
             header_end = None
             for i, line in enumerate(lines):
                 line_s = line.strip()
@@ -906,7 +920,7 @@ class App(tk.Tk):
             if header_end is None:
                 return
 
-            # Detect SINF format: map rows end with ,"\r"
+            # Detect SINF format: map rows end with ,"<CR>"
             sample = lines[header_end]
             sinf = sample.rstrip('\n').endswith('\r"')
             crlf = '\r\n' in raw_text
@@ -916,7 +930,7 @@ class App(tk.Tk):
             for grid_row in self._grid:
                 cells_str = ','.join('"' + c + '"' for c in grid_row)
                 if sinf:
-                    new_map_lines.append(cells_str + ',"' + '\r' + '"')
+                    new_map_lines.append(cells_str + ',"' + chr(13) + '"')
                 else:
                     new_map_lines.append(cells_str)
 
