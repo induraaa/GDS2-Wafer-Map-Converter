@@ -625,6 +625,7 @@ class App(tk.Tk):
         self._canvas.bind("<MouseWheel>", self._scroll)
         self._canvas.bind("<Control-MouseWheel>", self._ctrl_scroll)
         self._canvas.bind("<Configure>", self._on_canvas_configure)
+        self._canvas.bind("<Double-Button-1>", self._cell_click)
 
         # ── Right: Editable Raw Text ──
         self._raw_frame = tk.Frame(split, bg=WIN_BG)
@@ -857,6 +858,88 @@ class App(tk.Tk):
             nm = {'?': 'Die', '*': 'Edge', '.': 'Empty'}.get(ch, '?')
             self._coord_lbl.config(
                 text="  Col " + str(cx) + "   Row " + str(cy) + "   [" + nm + "]  ")
+
+    def _cell_click(self, event):
+        """Double-click a cell to cycle: active (?) -> edge (*) -> empty (.) -> active."""
+        if not self._grid:
+            return
+        px = self._cell_px
+        cx = int(self._canvas.canvasx(event.x) // px)
+        cy = int(self._canvas.canvasy(event.y) // px)
+        rows = len(self._grid)
+        cols = len(self._grid[0]) if self._grid else 0
+        if not (0 <= cx < cols and 0 <= cy < rows):
+            return
+
+        # Cycle: ? -> * -> . -> ?
+        cycle = {'?': '*', '*': '.', '.': '?'}
+        current = self._grid[cy][cx]
+        new_val = cycle.get(current, '?')
+
+        # Update grid in-place
+        row = list(self._grid[cy])
+        row[cx] = new_val
+        self._grid[cy] = row
+
+        # Redraw canvas
+        self._draw()
+
+        # Sync back to the Raw Output panel
+        try:
+            raw_text = self._raw_txt.get("1.0", tk.END)
+            lines = raw_text.split('\n')
+
+            # Find where map rows start (same logic as _update_from_raw_auto)
+            header_end = None
+            for i, line in enumerate(lines):
+                line_s = line.strip()
+                if not line_s:
+                    continue
+                parts = line_s.split('","')
+                if len(parts) < 10:
+                    continue
+                cells = [p.strip().strip('"') for p in parts]
+                if all(c in ('.', '?', '*') for c in cells if c):
+                    header_end = i
+                    break
+
+            if header_end is None:
+                return
+
+            # Detect SINF format: map rows end with ,"\r"
+            sample = lines[header_end]
+            sinf = sample.rstrip('\n').endswith('\r"')
+            crlf = '\r\n' in raw_text
+
+            # Rebuild map rows from current grid
+            new_map_lines = []
+            for grid_row in self._grid:
+                cells_str = ','.join('"' + c + '"' for c in grid_row)
+                if sinf:
+                    new_map_lines.append(cells_str + ',"' + '\r' + '"')
+                else:
+                    new_map_lines.append(cells_str)
+
+            header_lines = lines[:header_end]
+            sep = '\r\n' if crlf else '\n'
+            new_text = sep.join(header_lines) + sep + sep.join(new_map_lines) + sep
+
+            # Update raw panel without triggering debounce
+            self._raw_txt.unbind("<<Modified>>")
+            self._raw_txt.delete("1.0", tk.END)
+            self._raw_txt.insert(tk.END, new_text)
+            self._raw_txt.edit_modified(False)
+            self._raw_txt.bind("<<Modified>>", self._on_text_modified)
+
+            # Update bytes and stats
+            self._out_bytes = new_text.encode('latin-1', errors='replace')
+            die_count = sum(r.count('?') for r in self._grid)
+            self._s_dies.config(text=f"{die_count:,}")
+            self._s_size.config(text=fmt_size(len(self._out_bytes)))
+
+        except Exception:
+            pass  # Grid already updated visually; raw sync is best-effort
+
 
     def _scroll(self, event):
         self._canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
