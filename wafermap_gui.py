@@ -96,12 +96,12 @@ def build_grid(coords, diameter, die_x, die_y, show_edge):
     return grid
 
 
-def format_output(grid, wafer_id, diameter, die_count, line_mode, bin_rows=None):
+def format_output(grid, wafer_id, diameter, die_count, line_mode, bin_rows=None, die_x=None, die_y=None):
     n_rows = len(grid)
     n_cols = len(grid[0]) if grid else 0
     diam_str = str(diameter)
     header = [
-        '"' + wafer_id + '",6,"METRIC","BOTTOM","' + diam_str + '","' + diam_str + '",' +
+        '"' + wafer_id + '",6,"METRIC","BOTTOM","' + str(die_x if die_x is not None else diam_str) + '","' + str(die_y if die_y is not None else diam_str) + '",' +
         str(n_rows) + ',' + str(n_cols) + ',"0","0"',
         '"44","4"', '"0"', '"1","4"', '"POST"', '0', '0', '0',
         '"FALSE"', '0', '0', '"FALSE"', '"0"', '"0"',
@@ -363,7 +363,7 @@ class App(tk.Tk):
         body.pack(fill=tk.BOTH, expand=True)
 
         # Left sidebar
-        left = tk.Frame(body, bg=WIN_BG, width=255, relief=tk.SUNKEN, bd=1)
+        left = tk.Frame(body, bg=WIN_BG, width=275, relief=tk.SUNKEN, bd=1)
         left.pack(side=tk.LEFT, fill=tk.Y, padx=(4, 0), pady=4)
         left.pack_propagate(False)
         self._build_sidebar(left)
@@ -625,8 +625,7 @@ class App(tk.Tk):
         self._canvas.bind("<MouseWheel>", self._scroll)
         self._canvas.bind("<Control-MouseWheel>", self._ctrl_scroll)
         self._canvas.bind("<Configure>", self._on_canvas_configure)
-        self._canvas.bind("<Double-Button-1>", self._cell_click)
-
+        self._canvas.bind("<Button-1>", self._cell_click)
         # ── Right: Editable Raw Text ──
         self._raw_frame = tk.Frame(split, bg=WIN_BG)
         split.add(self._raw_frame, minsize=300)
@@ -735,7 +734,7 @@ class App(tk.Tk):
 
             grid = build_grid(coords, diameter, die_x, die_y, show_edge)
             bin_rows = self._get_bin_rows()
-            out = format_output(grid, wafer_id, diameter, len(coords), line_mode, bin_rows)
+            out = format_output(grid, wafer_id, diameter, len(coords), line_mode, bin_rows, die_x=die_x, die_y=die_y)
             elapsed = time.perf_counter() - t0
 
             self.after(0, lambda: self._conv_done(grid, out, len(coords), elapsed))
@@ -778,45 +777,40 @@ class App(tk.Tk):
     def _draw(self):
         if not self._grid:
             return
-        grid = self._grid
-        rows, cols = len(grid), len(grid[0]) if grid else 0
-        px = self._cell_px
-        COL = {'?': DIE_COL, '*': EDGE_COL, '.': OUT_COL}
-
-        img = tk.PhotoImage(width=cols * px, height=rows * px)
-        for r in range(rows):
-            colours = [COL.get(c, OUT_COL) for c in grid[r]]
-            if px == 1:
-                row_str = "{" + " ".join(colours) + "}"
-            else:
-                exp = []
-                for col in colours:
-                    exp.extend([col] * px)
-                row_str = "{" + " ".join(exp) + "}"
-            for p in range(px):
-                img.put(row_str, to=(0, r * px + p))
 
         self._canvas.delete("all")
-        self._canvas_img = img
-        self._canvas.create_image(2, 2, anchor="nw", image=img)
+        grid = self._grid
+        rows = len(grid)
+        cols = len(grid[0])
+        px = self._cell_px
 
-        # ── Draw grid lines if enabled and zoomed enough ──
+        COL = {'?': DIE_COL, '*': EDGE_COL, '.': OUT_COL}
+
+        for r in range(rows):
+            y1 = r * px
+            y2 = y1 + px
+            for c in range(cols):
+                x1 = c * px
+                x2 = x1 + px
+                color = COL.get(grid[r][c], OUT_COL)
+                self._canvas.create_rectangle(
+                    x1, y1, x2, y2,
+                    fill=color, outline=color if not self._v_grid.get() else ""
+                )
+
+        # Grid lines fast‑render
         if self._v_grid.get() and px >= 6:
+            # horizontal
             for r in range(rows + 1):
-                y = r * px + 2
-                self._canvas.create_line(
-                    2, y, cols * px + 2, y,
-                    fill="#999999", width=1)
+                y = r * px
+                self._canvas.create_line(0, y, cols * px, y, fill="#999999")
+            # vertical
             for c in range(cols + 1):
-                x = c * px + 2
-                self._canvas.create_line(
-                    x, 2, x, rows * px + 2,
-                    fill="#999999", width=1)
+                x = c * px
+                self._canvas.create_line(x, 0, x, rows * px, fill="#999999")
 
-        self._canvas.config(scrollregion=(0, 0, cols * px + 4, rows * px + 4))
-        self._canvas.xview_moveto(0)
-        self._canvas.yview_moveto(0)
-        self._zoom_lbl.config(text="Zoom: " + str(round(px / 5 * 100)) + "%")
+        self._canvas.config(scrollregion=(0, 0, cols * px, rows * px))
+        self._zoom_lbl.config(text=f"Zoom: {round(px / 5 * 100)}%")
 
     def _zoom(self, factor):
         self._cell_px = max(1, min(40, round(self._cell_px * factor)))
@@ -860,7 +854,7 @@ class App(tk.Tk):
                 text="  Col " + str(cx) + "   Row " + str(cy) + "   [" + nm + "]  ")
 
     def _cell_click(self, event):
-        """Double-click a cell to cycle: active (?) -> edge (*) -> empty (.) -> active."""
+        """Single-click a cell to cycle: ? → * → . → ?"""
         if not self._grid:
             return
         px = self._cell_px
